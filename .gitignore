@@ -1,0 +1,6 @@
+*csv 
+venv/
+*png
+*pkl
+*json
+*.tsv
