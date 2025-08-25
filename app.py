@@ -1,10 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import xgboost as xgb
 import io
 from datetime import datetime
 import base64
+
+# Try to import xgboost with error handling
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    st.error("❌ XGBoost is not installed. Please install it using: `pip install xgboost`")
+    st.stop()
 
 # Set page configuration
 st.set_page_config(
@@ -58,13 +66,19 @@ st.markdown("""
 
 def load_model():
     """Load the XGBoost model from file"""
+    if not XGBOOST_AVAILABLE:
+        st.error("XGBoost is not available. Please install it first.")
+        return None
+    
     try:
         model = xgb.XGBClassifier()
         model.load_model('xgb_claim_model.json')
         return model
+    except FileNotFoundError:
+        st.error("❌ Model file 'xgb_claim_model.json' not found. Please ensure it's in the same directory as this app.")
+        return None
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        st.error("Please ensure 'xgb_claim_model.json' is in the same directory as this app.")
+        st.error(f"❌ Error loading model: {str(e)}")
         return None
 
 def preprocess_data(df):
