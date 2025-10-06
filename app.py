@@ -11,7 +11,17 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-    st.error("❌ XGBoost is not installed. Please install it using: `pip install xgboost`")
+    st.error("""
+    ❌ **XGBoost is not installed.**
+    
+    **If you're running locally:**
+    - Install with: `pip install xgboost`
+    
+    **If you're using Streamlit Cloud:**
+    - Make sure you have a `requirements.txt` file in your repository
+    - Add `xgboost>=1.7.0` to the requirements.txt file
+    - Commit and push the changes to trigger a redeploy
+    """)
     st.stop()
 
 # Set page configuration
@@ -88,8 +98,8 @@ def preprocess_data(df):
     try:
         df_processed = df.copy()
         
-        # Required columns for preprocessing
-        required_cols = ['status', 'spartek', 'First_reg', 'SDBEITR5', 'vtr_dau', 'kosten_verw', 'kosten_prov']
+        # Required columns for preprocessing (updated to use ersz_final instead of First_reg)
+        required_cols = ['status', 'spartek', 'ersz_final', 'SDBEITR5', 'vtr_dau', 'kosten_verw', 'kosten_prov']
         missing_cols = [col for col in required_cols if col not in df_processed.columns]
         
         if missing_cols:
@@ -106,10 +116,24 @@ def preprocess_data(df):
         df_processed['spartek'] = pd.factorize(df_processed['spartek'])[0] + 1
         st.write("✅ Transformed spartek column")
         
-        # 3. Car_age_indays calculation
-        df_processed['First_reg'] = pd.to_datetime(df_processed['First_reg'])
+        # 3. Create First_reg from ersz_final and calculate Car_age_indays
+        try:
+            # First try the format you mentioned: %d%b%Y (e.g., "08May1981")
+            df_processed['First_reg'] = pd.to_datetime(df_processed['ersz_final'], format="%d%b%Y")
+        except ValueError:
+            try:
+                # If that fails, try common European format: %d.%m.%Y (e.g., "08.05.1981")
+                df_processed['First_reg'] = pd.to_datetime(df_processed['ersz_final'], format="%d.%m.%Y")
+            except ValueError:
+                try:
+                    # Try another common format: %m/%d/%Y
+                    df_processed['First_reg'] = pd.to_datetime(df_processed['ersz_final'], format="%m/%d/%Y")
+                except ValueError:
+                    # If all specific formats fail, try automatic parsing
+                    df_processed['First_reg'] = pd.to_datetime(df_processed['ersz_final'])
+        
         df_processed['Car_age_indays'] = (pd.Timestamp.today() - df_processed['First_reg']).dt.days
-        st.write("✅ Calculated Car_age_indays")
+        st.write("✅ Created First_reg from ersz_final and calculated Car_age_indays")
         
         # 4. estimated_total_paid calculation
         df_processed['estimated_total_paid'] = (df_processed['SDBEITR5'] / (5 * 365)) * df_processed['vtr_dau']
@@ -161,7 +185,7 @@ def main():
         **Required Input Columns:**
         - `status` (will be converted to status_id)
         - `spartek` (will be transformed)
-        - `First_reg` (for car age calculation)
+        - `ersz_final` (will be converted to First_reg for car age calculation)
         - `SDBEITR5` (for payment estimation)
         - `vtr_dau`
         - `kosten_verw`
@@ -171,10 +195,10 @@ def main():
         - vtr_dau
         - kosten_verw
         - kosten_prov
-        - spartek
-        - status_id
-        - Car_age_indays
-        - estimated_total_paid
+        - spartek (transformed)
+        - status_id (from status)
+        - Car_age_indays (from ersz_final)
+        - estimated_total_paid (calculated)
         """)
     
     # Step 1: File Upload
@@ -189,9 +213,27 @@ def main():
     
     if uploaded_file is not None:
         try:
-            # Read uploaded file
+            # Read uploaded file with encoding handling
             if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
+                # Try different encodings for CSV files
+                encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+                df = None
+                
+                for encoding in encodings:
+                    try:
+                        uploaded_file.seek(0)  # Reset file pointer
+                        df = pd.read_csv(uploaded_file, encoding=encoding)
+                        st.success(f"✅ File successfully read with {encoding} encoding")
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                    except Exception as e:
+                        if encoding == encodings[-1]:  # Last encoding attempt
+                            raise e
+                        continue
+                
+                if df is None:
+                    raise ValueError("Could not read file with any supported encoding")
             else:
                 df = pd.read_excel(uploaded_file)
             
@@ -210,104 +252,143 @@ def main():
             st.markdown('<div class="step-header">Data Preview</div>', unsafe_allow_html=True)
             st.dataframe(df.head(10), use_container_width=True)
             
+            # Show column information to help debug
+            st.markdown('<div class="step-header">Available Columns</div>', unsafe_allow_html=True)
+            st.write("**Columns in your file:**")
+            st.write(list(df.columns))
+            
+            # Check for required columns and show status
+            required_cols = ['status', 'spartek', 'ersz_final', 'SDBEITR5', 'vtr_dau', 'kosten_verw', 'kosten_prov']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            present_cols = [col for col in required_cols if col in df.columns]
+            
+            if present_cols:
+                st.success(f"✅ Found required columns: {present_cols}")
+            if missing_cols:
+                st.error(f"❌ Missing required columns: {missing_cols}")
+            
             # Step 2: Load Model and Preprocess
             st.markdown('<div class="step-header">Step 2: Model Loading & Data Preprocessing</div>', unsafe_allow_html=True)
             
-            if st.button("🚀 Process Data & Make Predictions", type="primary"):
-                with st.spinner("Loading model and processing data..."):
-                    # Load model
-                    model = load_model()
-                    
-                    if model is not None:
-                        try:
-                            # Preprocess data
-                            df_processed, features_df = preprocess_data(df)
-                            
-                            # Make predictions
-                            st.write("🔮 Making predictions...")
-                            predictions = model.predict_proba(features_df)[:, 1]  # Get probability of positive class
-                            
-                            # Add predictions to original data
-                            df_with_predictions = df.copy()
-                            df_with_predictions['claim_probability'] = predictions
-                            df_with_predictions['claim_prediction'] = (predictions > 0.5).astype(int)
-                            
-                            st.markdown('<div class="success-box">✅ Predictions completed successfully!</div>', unsafe_allow_html=True)
-                            
-                            # Step 3: Display Results
-                            st.markdown('<div class="step-header">Step 3: Prediction Results</div>', unsafe_allow_html=True)
-                            
-                            # Summary statistics
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("Total Records", len(df_with_predictions))
-                            with col2:
-                                st.metric("Predicted Claims", int(df_with_predictions['claim_prediction'].sum()))
-                            with col3:
-                                st.metric("Claim Rate", f"{df_with_predictions['claim_prediction'].mean():.2%}")
-                            with col4:
-                                avg_prob = df_with_predictions['claim_probability'].mean()
-                                st.metric("Avg. Probability", f"{avg_prob:.3f}")
-                            
-                            # Results table
-                            st.subheader("📊 Detailed Results")
-                            
-                            # Display results with highlights
-                            display_df = df_with_predictions.copy()
-                            
-                            # Sort by probability for better visualization
-                            display_df = display_df.sort_values('claim_probability', ascending=False)
-                            
-                            st.dataframe(
-                                display_df,
-                                use_container_width=True,
-                                column_config={
-                                    "claim_probability": st.column_config.ProgressColumn(
-                                        "Claim Probability",
-                                        help="Probability of insurance claim",
-                                        min_value=0,
-                                        max_value=1,
-                                        format="%.3f"
-                                    ),
-                                    "claim_prediction": st.column_config.CheckboxColumn(
-                                        "Will Claim?",
-                                        help="Predicted claim (>50% probability)",
-                                    )
-                                }
-                            )
-                            
-                            # Step 4: Download Results
-                            st.markdown('<div class="step-header">Step 4: Download Results</div>', unsafe_allow_html=True)
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.subheader("📥 Download Options")
-                                download_format = st.selectbox("Choose format", ["CSV", "Excel"])
-                                filename = st.text_input("Filename", value="insurance_predictions")
-                            
-                            with col2:
-                                st.subheader("📈 Quick Stats")
-                                high_risk = (df_with_predictions['claim_probability'] > 0.7).sum()
-                                medium_risk = ((df_with_predictions['claim_probability'] > 0.3) & 
-                                             (df_with_predictions['claim_probability'] <= 0.7)).sum()
-                                low_risk = (df_with_predictions['claim_probability'] <= 0.3).sum()
+            # Only show the button if we have all required columns
+            if not missing_cols:
+                if st.button("🚀 Process Data & Make Predictions", type="primary"):
+                    with st.spinner("Loading model and processing data..."):
+                        # Load model
+                        model = load_model()
+                        
+                        if model is not None:
+                            try:
+                                # Preprocess data
+                                df_processed, features_df = preprocess_data(df)
                                 
-                                st.write(f"🔴 High Risk (>70%): {high_risk}")
-                                st.write(f"🟡 Medium Risk (30-70%): {medium_risk}")
-                                st.write(f"🟢 Low Risk (≤30%): {low_risk}")
-                            
-                            # Create download link
-                            download_link = create_download_link(df_with_predictions, filename, download_format)
-                            st.markdown(download_link, unsafe_allow_html=True)
-                            
-                        except Exception as e:
-                            st.markdown(f'<div class="error-box">❌ Error during processing: {str(e)}</div>', unsafe_allow_html=True)
-                            st.error("Please check your data format and ensure all required columns are present.")
+                                # Make predictions
+                                st.write("🔮 Making predictions...")
+                                predictions = model.predict_proba(features_df)[:, 1]  # Get probability of positive class
+                                
+                                # Add predictions to original data
+                                df_with_predictions = df.copy()
+                                df_with_predictions['claim_probability'] = predictions
+                                df_with_predictions['claim_prediction'] = (predictions > 0.5).astype(int)
+                                
+                                st.markdown('<div class="success-box">✅ Predictions completed successfully!</div>', unsafe_allow_html=True)
+                                
+                                # Step 3: Display Results
+                                st.markdown('<div class="step-header">Step 3: Prediction Results</div>', unsafe_allow_html=True)
+                                
+                                # Summary statistics
+                                col1, col2, col3, col4 = st.columns(4)
+                                with col1:
+                                    st.metric("Total Records", len(df_with_predictions))
+                                with col2:
+                                    st.metric("Predicted Claims", int(df_with_predictions['claim_prediction'].sum()))
+                                with col3:
+                                    st.metric("Claim Rate", f"{df_with_predictions['claim_prediction'].mean():.2%}")
+                                with col4:
+                                    avg_prob = df_with_predictions['claim_probability'].mean()
+                                    st.metric("Avg. Probability", f"{avg_prob:.3f}")
+                                
+                                # Results table
+                                st.subheader("📊 Detailed Results")
+                                
+                                # Display results with highlights
+                                display_df = df_with_predictions.copy()
+                                
+                                # Sort by probability for better visualization
+                                display_df = display_df.sort_values('claim_probability', ascending=False)
+                                
+                                st.dataframe(
+                                    display_df,
+                                    use_container_width=True,
+                                    column_config={
+                                        "claim_probability": st.column_config.ProgressColumn(
+                                            "Claim Probability",
+                                            help="Probability of insurance claim",
+                                            min_value=0,
+                                            max_value=1,
+                                            format="%.3f"
+                                        ),
+                                        "claim_prediction": st.column_config.CheckboxColumn(
+                                            "Will Claim?",
+                                            help="Predicted claim (>50% probability)",
+                                        )
+                                    }
+                                )
+                                
+                                # Step 4: Download Results
+                                st.markdown('<div class="step-header">Step 4: Download Results</div>', unsafe_allow_html=True)
+                                
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    st.subheader("📥 Download Options")
+                                    download_format = st.selectbox("Choose format", ["CSV", "Excel"])
+                                    filename = st.text_input("Filename", value="insurance_predictions")
+                                
+                                with col2:
+                                    st.subheader("📈 Quick Stats")
+                                    high_risk = (df_with_predictions['claim_probability'] > 0.7).sum()
+                                    medium_risk = ((df_with_predictions['claim_probability'] > 0.3) & 
+                                                 (df_with_predictions['claim_probability'] <= 0.7)).sum()
+                                    low_risk = (df_with_predictions['claim_probability'] <= 0.3).sum()
+                                    
+                                    st.write(f"🔴 High Risk (>70%): {high_risk}")
+                                    st.write(f"🟡 Medium Risk (30-70%): {medium_risk}")
+                                    st.write(f"🟢 Low Risk (≤30%): {low_risk}")
+                                
+                                # Create download link
+                                download_link = create_download_link(df_with_predictions, filename, download_format)
+                                st.markdown(download_link, unsafe_allow_html=True)
+                                
+                            except Exception as e:
+                                st.markdown(f'<div class="error-box">❌ Error during processing: {str(e)}</div>', unsafe_allow_html=True)
+                                st.error("Please check your data format and ensure all required columns are present.")
+                                
+                                # Show debugging information
+                                st.write("**Debug Information:**")
+                                st.write(f"Data shape: {df.shape}")
+                                st.write(f"Available columns: {list(df.columns)}")
+                                if 'ersz_final' in df.columns:
+                                    st.write(f"Sample ersz_final values: {df['ersz_final'].head().tolist()}")
+            else:
+                st.warning("⚠️ Cannot proceed with predictions. Please ensure your file contains all required columns.")
             
         except Exception as e:
             st.markdown(f'<div class="error-box">❌ Error reading file: {str(e)}</div>', unsafe_allow_html=True)
-            st.error("Please ensure your file is a valid CSV or Excel file.")
+            
+            # Provide helpful suggestions for common issues
+            st.error("**Possible solutions:**")
+            st.write("1. **Encoding issue**: Try saving your CSV with UTF-8 encoding")
+            st.write("2. **File corruption**: Check if the file opens correctly in Excel/text editor")
+            st.write("3. **Format issue**: Ensure it's a valid CSV or Excel file")
+            st.write("4. **Special characters**: Remove any unusual characters from the file")
+            
+            # Show file details for debugging
+            st.write("**File details:**")
+            st.write(f"- Filename: {uploaded_file.name}")
+            st.write(f"- Size: {uploaded_file.size / 1024:.1f} KB")
+            st.write(f"- Type: {uploaded_file.type}")
+            return
     
     else:
         st.markdown('<div class="info-box">👆 Please upload a file to get started.</div>', unsafe_allow_html=True)
